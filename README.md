@@ -42,7 +42,7 @@ Install Python
 ### Setup Nodejs localhost
 1. Clone the repository:
    ```bash
-   git clone https://github.com/adityakumar_dev/yt-downloader
+   git clone https://github.com/adityakumar-dev/Yt_Downloader
 2. Navigate to Directory 
     ```bash
     cd yt-downloader 
