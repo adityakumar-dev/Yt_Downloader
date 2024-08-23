@@ -1,8 +1,8 @@
 const express = require("express");
 const cors = require("cors");
-const { spawn } = require("child_process");
-const { URL } = require('url');
-
+const { spawn, exec } = require("child_process");
+const { URL, format } = require('url');
+const youtubedl = require('youtube-dl-exec');
 const app = express();
 const PORT = process.env.PORT || 4000;
 // const MAX_FILE_SIZE = process.env.MAX_FILE_SIZE || 1024 * 1024 * 1024; // 1GB default
@@ -14,14 +14,23 @@ app.get("/", (req, res) => {
     res.send("Hello World");
 });
 
-// Function to get video info
+function formatDuration(seconds) {
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const remainingSeconds = Math.floor(seconds % 60);
+
+    return `${hours > 0 ? `${hours}h ` : ''}${minutes > 0 ? `${minutes}m ` : ''}${remainingSeconds}s`;
+}
+
 const getInfo = async (url) => {
     return new Promise((resolve, reject) => {
+        console.log("Writing data")
         const child = spawn('yt-dlp', ['-J', url]);
         let stdout = '';
         let stderr = '';
 
         child.stdout.on('data', (data) => {
+            console.log("Writing data")
             stdout += data;
         });
 
@@ -36,17 +45,43 @@ const getInfo = async (url) => {
             }
             try {
                 const info = JSON.parse(stdout);
-                const allFormats = info.formats.map(format => ({
-                    itag: format.format_id,
-                    quality: format.format_note,
-                    type: format.ext,
-                    audioBitrate: format.abr,
-                    videoBitrate: format.vbr,
-                    isVideo: format.vcodec !== "none",
-                    isAudio: format.acodec !== "none",
-                }));
-                const videoAndAudioFormats = allFormats.filter(format => (format.isVideo || format.isAudio) && format.quality !== undefined && format.quality !== 'Default');
-                resolve({ title: info.title, videoAndAudioFormats });
+
+                console.log(typeof (info))
+                console.log(info.duration)
+                const allFormats = info.formats.map(format => {
+                    const audioBitrate = format.abr !== null ? format.abr : 0;
+                    const videoBitrate = format.vbr !== null ? format.vbr : 0;
+
+
+
+                    return {
+                        'url': url,
+                        itag: format.format_id,
+                        quality: format.format_note,
+                        type: format.ext,
+                        audioBitrate,
+                        videoBitrate,
+                        durationTotal: info.duration,
+                        duration: formatDuration(info.duration),
+                        isVideo: format.vcodec !== "none",
+                        isAudio: format.acodec !== "none",
+                    }
+                });
+
+
+                const audioFormats = allFormats.filter(format => (format.isAudio && format.quality !== undefined && format.quality !== 'Default'));
+                const bestVideoFormats = allFormats
+                    .filter(format => format.isVideo && format.type === 'mp4' && format.videoBitrate !== 0 && format.quality)
+                    .reduce((acc, format) => {
+                        const existing = acc.find(f => f.quality === format.quality);
+                        if (!existing || format.videoBitrate > existing.videoBitrate) {
+                            acc = acc.filter(f => f.quality !== format.quality);
+                            acc.push(format);
+                        }
+                        return acc;
+                    }, []);
+                // const tempFormats = allFormats.filter(format => ((format.abr !== null && format.vbr !== null) && format.abr > 0 && format.vbr > 0));
+                resolve({ title: info.title, thumbnail: info.thumbnail || null, bestVideoFormats, audioFormats });
             } catch (e) {
                 console.error("Error parsing yt-dlp output: " + e);
                 reject(new Error("Error parsing yt-dlp output: " + e));
@@ -54,6 +89,7 @@ const getInfo = async (url) => {
         });
     });
 };
+
 
 const isValidUrl = (string) => {
     try {
@@ -66,23 +102,25 @@ const isValidUrl = (string) => {
 
 app.post("/info", async (req, res) => {
     const { url } = req.body;
-
+    console.log(url)
     if (!url || !isValidUrl(url)) {
         return res.status(400).json({ message: "Invalid URL provided" });
     }
 
     try {
-        const { title, videoAndAudioFormats } = await getInfo(url);
-        res.json({ title, videoAndAudioFormats });
+        console.log("request /info")
+        const { title, audioFormats, thumbnail, bestVideoFormats } = await getInfo(url);
+        res.json({ title, thumbnail, audioFormats, bestVideoFormats, });
     } catch (error) {
         console.error(error);
         res.status(500).json({ message: "Failed to retrieve video information" });
     }
 });
 
-app.post('/download', async (req, res) => {
-    const { url, title, format_id, type } = req.body;
 
+app.get('/download', async (req, res) => {
+    const { url, title, format_id, type } = req.query;
+    console.log(`${url} ${title} ${format_id}`)
     if (!url || !isValidUrl(url)) {
         return res.status(400).json({ message: "Invalid URL provided" });
     }
@@ -96,22 +134,23 @@ app.post('/download', async (req, res) => {
 
         const safeTitle = title ? title.replace(/[^a-z0-9]/gi, '_').toLowerCase() : 'downloaded_video';
         const command = `yt-dlp`;
-        const args = ['-f', format_id, '--no-part', '--output', '-', url];
+        const args = [
 
+            '-vU', '-f', `${format_id}+bestaudio`,
+            '--verbose',
+            '-o', '-',
+            url
+        ];
         res.header('Content-Disposition', `attachment; filename="${safeTitle}.${type}"`);
-        res.header('Content-Type', 'application/octet-stream');
+        res.setHeader('Content-Type', 'video/mp4');
+        res.setHeader('Accept-Ranges', 'bytes');
 
         const child = spawn(command, args);
 
-        // let downloadedSize = 0;
         child.stdout.on('data', (chunk) => {
-            // downloadedSize += chunk.length;
-            // if (downloadedSize > MAX_FILE_SIZE) {
-            //     child.kill();
-            //     res.end();
-            // } else {
+
             res.write(chunk);
-            // }
+
         });
 
         child.stderr.on('data', (data) => {
